@@ -1,0 +1,463 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>File Analyzer Service</title>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>File Analyzer Service</h1>
+            <div class="header-info">
+                <span>Время старта: <strong id="start-time">{{ start_time }}</strong> (НСК)</span>
+                <span>Статус: <span id="status-badge" class="badge idle">Ожидание</span></span>
+            </div>
+        </header>
+
+        <!-- Управление -->
+        <div class="controls">
+            <button id="download-btn" class="btn primary">Скачать данные</button>
+            <button id="analyze-btn" class="btn secondary" disabled>Произвести расчёты</button>
+            <button id="refresh-btn" class="btn tertiary">Обновить</button>
+            <span id="candidate-id-display" class="candidate-info">ID: <span id="candidate-id">-</span></span>
+        </div>
+
+        <!-- Прогресс скачивания -->
+        <div id="download-progress" class="progress-section hidden">
+            <h3>Процесс скачивания</h3>
+            <div class="progress-bar-container">
+                <div id="progress-bar" class="progress-bar" style="width: 0%"></div>
+            </div>
+            <div class="progress-info">
+                <span>Получено <strong id="names-count">0</strong> названий файлов</span>
+                <span>Скачано <strong id="downloaded-count">0</strong> из <strong id="total-count">0</strong></span>
+                <span id="time-elapsed">⏱ 00:00</span>
+            </div>
+            <div id="download-status" class="status-message"></div>
+        </div>
+
+        <!-- Таблица файлов -->
+        <div class="files-section">
+            <div class="files-header">
+                <h3>Скачанные файлы</h3>
+                <div class="files-actions">
+                    <button id="select-all-btn" class="btn small">Выбрать все на странице</button>
+                    <button id="select-all-files-btn" class="btn small">Выбрать все файлы</button>
+                    <button id="clear-selection-btn" class="btn small">Снять выделение</button>
+                </div>
+            </div>
+            
+            <div id="files-table-container">
+                <table id="files-table">
+                    <thead>
+                        <tr>
+                            <th><input type="checkbox" id="select-all-checkbox"></th>
+                            <th>Имя файла</th>
+                            <th>Время скачивания (НСК)</th>
+                            <th>Размер</th>
+                        </tr>
+                    </thead>
+                    <tbody id="files-body">
+                        <tr><td colspan="4" class="empty-message">Нет скачанных файлов</td></tr>
+                    </tbody>
+                </table>
+            </div>
+            
+            <div class="pagination" id="pagination">
+                <button id="prev-page" class="btn small" disabled>←</button>
+                <span id="page-info">Страница 1 из 1</span>
+                <button id="next-page" class="btn small" disabled>→</button>
+            </div>
+        </div>
+
+        <div id="analysis-results" class="results-section hidden">
+            <h3>Результаты анализа</h3>
+            <div class="results-tabs">
+                <button class="tab-btn active" data-tab="total">Общая статистика</button>
+                <button class="tab-btn" data-tab="files">По файлам</button>
+            </div>
+            
+            <div id="total-stats" class="tab-content active">
+                <div class="stats-grid" id="total-stats-grid"></div>
+            </div>
+            
+            <div id="file-stats" class="tab-content hidden">
+                <div id="file-stats-container"></div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let state = {
+            candidateId: localStorage.getItem('candidateId') || null,
+            currentPage: 1,
+            perPage: 10,
+            totalPages: 1,
+            selectedFiles: new Set(),
+            allFiles: [],
+            isDownloading: false,
+            statsId: null
+        };
+
+        document.addEventListener('DOMContentLoaded', () => {
+            if (!state.candidateId) {
+                state.candidateId = generateUUID();
+                localStorage.setItem('candidateId', state.candidateId);
+            }
+            document.getElementById('candidate-id').textContent = state.candidateId;
+            
+            loadFiles();
+            setupEventListeners();
+        });
+
+        function generateUUID() {
+            return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function(c) {
+                const r = Math.random() * 16 | 0;
+                const v = c === 'x' ? r : (r & 0x3 | 0x8);
+                return v.toString(16);
+            });
+        }
+
+        function setupEventListeners() {
+            document.getElementById('download-btn').addEventListener('click', startDownload);
+
+            document.getElementById('analyze-btn').addEventListener('click', startAnalysis);
+
+            document.getElementById('refresh-btn').addEventListener('click', () => loadFiles());
+
+            document.getElementById('prev-page').addEventListener('click', () => changePage(-1));
+            document.getElementById('next-page').addEventListener('click', () => changePage(1));
+
+            document.getElementById('select-all-btn').addEventListener('click', selectAllOnPage);
+            document.getElementById('select-all-files-btn').addEventListener('click', selectAllFiles);
+            document.getElementById('clear-selection-btn').addEventListener('click', clearSelection);
+            document.getElementById('select-all-checkbox').addEventListener('change', (e) => {
+                toggleAllCheckboxes(e.target.checked);
+            });
+            
+            document.querySelectorAll('.tab-btn').forEach(btn => {
+                btn.addEventListener('click', () => switchTab(btn.dataset.tab));
+            });
+        }
+
+        async function loadFiles() {
+            try {
+                const response = await fetch(
+                    `/api/files?page=${state.currentPage}&per_page=${state.perPage}&candidate_id=${state.candidateId}`
+                );
+                const data = await response.json();
+                
+                state.allFiles = data.files;
+                state.totalPages = data.total_pages;
+                
+                renderFiles(data.files);
+                updatePagination(data);
+                updateAnalyzeButton();
+                updateStatusBadge();
+                
+            } catch (error) {
+                console.error('Error loading files:', error);
+                showError('Ошибка загрузки файлов');
+            }
+        }
+
+        function renderFiles(files) {
+            const tbody = document.getElementById('files-body');
+            
+            if (files.length === 0) {
+                tbody.innerHTML = '<tr><td colspan="4" class="empty-message">Нет скачанных файлов</td></tr>';
+                return;
+            }
+            
+            tbody.innerHTML = files.map(file => {
+                const isChecked = state.selectedFiles.has(file.name);
+                return `
+                    <tr>
+                        <td><input type="checkbox" class="file-checkbox" data-name="${file.name}" ${isChecked ? 'checked' : ''}></td>
+                        <td>${file.name}</td>
+                        <td>${formatDateTime(file.downloaded_at)}</td>
+                        <td>${formatSize(file.size)}</td>
+                    </tr>
+                `;
+            }).join('');
+
+            document.querySelectorAll('.file-checkbox').forEach(cb => {
+                cb.addEventListener('change', (e) => {
+                    const name = e.target.dataset.name;
+                    if (e.target.checked) {
+                        state.selectedFiles.add(name);
+                    } else {
+                        state.selectedFiles.delete(name);
+                    }
+                    updateAnalyzeButton();
+                });
+            });
+        }
+
+        function updatePagination(data) {
+            document.getElementById('page-info').textContent = 
+                `Страница ${data.page} из ${data.total_pages}`;
+            
+            document.getElementById('prev-page').disabled = data.page <= 1;
+            document.getElementById('next-page').disabled = data.page >= data.total_pages;
+
+            const checkboxes = document.querySelectorAll('.file-checkbox');
+            const checked = document.querySelectorAll('.file-checkbox:checked');
+            const allChecked = checkboxes.length > 0 && checkboxes.length === checked.length;
+            document.getElementById('select-all-checkbox').checked = allChecked;
+        }
+
+        function changePage(delta) {
+            const newPage = state.currentPage + delta;
+            if (newPage >= 1 && newPage <= state.totalPages) {
+                state.currentPage = newPage;
+                loadFiles();
+            }
+        }
+
+        function selectAllOnPage() {
+            document.querySelectorAll('.file-checkbox').forEach(cb => {
+                cb.checked = true;
+                state.selectedFiles.add(cb.dataset.name);
+            });
+            document.getElementById('select-all-checkbox').checked = true;
+            updateAnalyzeButton();
+        }
+
+        function selectAllFiles() {
+            fetchAllFiles().then(allFiles => {
+                allFiles.forEach(name => state.selectedFiles.add(name));
+                loadFiles();
+                updateAnalyzeButton();
+            });
+        }
+
+        async function fetchAllFiles() {
+            let allFiles = [];
+            let page = 1;
+            let hasMore = true;
+            
+            while (hasMore) {
+                const response = await fetch(
+                    `/api/files?page=${page}&per_page=100&candidate_id=${state.candidateId}`
+                );
+                const data = await response.json();
+                allFiles = allFiles.concat(data.files.map(f => f.name));
+                hasMore = page < data.total_pages;
+                page++;
+            }
+            
+            return allFiles;
+        }
+
+        function clearSelection() {
+            state.selectedFiles.clear();
+            document.querySelectorAll('.file-checkbox').forEach(cb => {
+                cb.checked = false;
+            });
+            document.getElementById('select-all-checkbox').checked = false;
+            updateAnalyzeButton();
+        }
+
+        function toggleAllCheckboxes(checked) {
+            document.querySelectorAll('.file-checkbox').forEach(cb => {
+                cb.checked = checked;
+                if (checked) {
+                    state.selectedFiles.add(cb.dataset.name);
+                } else {
+                    state.selectedFiles.delete(cb.dataset.name);
+                }
+            });
+            updateAnalyzeButton();
+        }
+
+        function updateAnalyzeButton() {
+            const btn = document.getElementById('analyze-btn');
+            btn.disabled = state.selectedFiles.size === 0;
+            btn.textContent = `Произвести расчёты (${state.selectedFiles.size})`;
+        }
+
+        function updateStatusBadge() {
+            const badge = document.getElementById('status-badge');
+            if (state.isDownloading) {
+                badge.textContent = 'Скачивание...';
+                badge.className = 'badge downloading';
+            } else if (state.selectedFiles.size > 0) {
+                badge.textContent = 'Готов к анализу';
+                badge.className = 'badge ready';
+            } else {
+                badge.textContent = 'Ожидание';
+                badge.className = 'badge idle';
+            }
+        }
+
+
+        async function startDownload() {
+            if (state.isDownloading) return;
+            
+            state.isDownloading = true;
+            document.getElementById('download-btn').disabled = true;
+            document.getElementById('download-progress').classList.remove('hidden');
+            
+            const progressBar = document.getElementById('progress-bar');
+            const namesCount = document.getElementById('names-count');
+            const downloadedCount = document.getElementById('downloaded-count');
+            const totalCount = document.getElementById('total-count');
+            const timeElapsed = document.getElementById('time-elapsed');
+            const statusMsg = document.getElementById('download-status');
+            
+            let totalNames = 0;
+            let totalDownloaded = 0;
+            const startTime = Date.now();
+
+            const timerInterval = setInterval(() => {
+                const elapsed = Math.floor((Date.now() - startTime) / 1000);
+                const mins = String(Math.floor(elapsed / 60)).padStart(2, '0');
+                const secs = String(elapsed % 60).padStart(2, '0');
+                timeElapsed.textContent = `t ${mins}:${secs}`;
+            }, 1000);
+            
+            try {
+                statusMsg.textContent = 'Получение списка файлов...';
+                statusMsg.className = 'status-message info';
+                
+                const response = await fetch(`/api/files/download?candidate_id=${state.candidateId}`, {
+                    method: 'POST'
+                });
+                
+                const result = await response.json();
+                
+                totalDownloaded = result.total_files || 0;
+                totalNames = result.total_names_fetched || 0;
+
+                progressBar.style.width = '100%';
+                namesCount.textContent = totalNames;
+                downloadedCount.textContent = totalDownloaded;
+                totalCount.textContent = totalDownloaded;
+                
+                statusMsg.textContent = `Скачано ${totalDownloaded} файлов за ${formatTime(result.elapsed_time)}`;
+                statusMsg.className = 'status-message success';
+
+                await loadFiles();
+                
+            } catch (error) {
+                console.error('Download error:', error);
+                statusMsg.textContent = `Ошибка: ${error.message}`;
+                statusMsg.className = 'status-message error';
+            } finally {
+                clearInterval(timerInterval);
+                state.isDownloading = false;
+                document.getElementById('download-btn').disabled = false;
+                updateStatusBadge();
+            }
+        }
+
+
+        async function startAnalysis() {
+            if (state.selectedFiles.size === 0) return;
+            
+            const fileNames = Array.from(state.selectedFiles);
+            
+            try {
+                document.getElementById('analyze-btn').disabled = true;
+                document.getElementById('analyze-btn').textContent = '⏳ Анализ...';
+                
+                const response = await fetch(`/api/files/analyze?candidate_id=${state.candidateId}`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(fileNames)
+                });
+                
+                const result = await response.json();
+                state.statsId = result.stats_id;
+                
+                displayResults(result.total_stats, result.file_stats);
+                
+                document.getElementById('analysis-results').classList.remove('hidden');
+                
+            } catch (error) {
+                console.error('Analysis error:', error);
+                showError('Ошибка при анализе файлов');
+            } finally {
+                document.getElementById('analyze-btn').disabled = false;
+                document.getElementById('analyze-btn').textContent = `Произвести расчёты (${state.selectedFiles.size})`;
+            }
+        }
+
+        function displayResults(totalStats, fileStats) {
+            const grid = document.getElementById('total-stats-grid');
+            const maxVal = Math.max(...totalStats);
+            
+            grid.innerHTML = totalStats.map((count, digit) => `
+                <div class="stat-item">
+                    <span class="stat-label">Цифра ${digit}</span>
+                    <div class="stat-bar-container">
+                        <div class="stat-bar" style="width: ${(count / maxVal * 100)}%; background: ${getColor(digit)}"></div>
+                    </div>
+                    <span class="stat-count">${count}</span>
+                </div>
+            `).join('');
+
+            const container = document.getElementById('file-stats-container');
+            container.innerHTML = Object.entries(fileStats).map(([fileName, stats]) => `
+                <div class="file-stat">
+                    <h4>${fileName}</h4>
+                    <div class="file-stat-grid">
+                        ${stats.map((count, digit) => `
+                            <span>${digit}: ${count}</span>
+                        `).join('')}
+                    </div>
+                </div>
+            `).join('');
+        }
+
+        function getColor(digit) {
+            const colors = ['#FF6B6B', '#FFA94D', '#FFD93D', '#6BCB77', '#4D96FF', 
+                           '#9B59B6', '#E74C3C', '#2ECC71', '#F39C12', '#1ABC9C'];
+            return colors[digit] || '#95a5a6';
+        }
+
+        function switchTab(tabId) {
+            document.querySelectorAll('.tab-content').forEach(el => el.classList.add('hidden'));
+            document.querySelectorAll('.tab-btn').forEach(el => el.classList.remove('active'));
+            
+            document.getElementById(`${tabId}-stats`).classList.remove('hidden');
+            document.querySelector(`.tab-btn[data-tab="${tabId}"]`).classList.add('active');
+        }
+
+
+        function formatDateTime(isoString) {
+            if (!isoString) return '-';
+            const date = new Date(isoString);
+            return date.toLocaleString('ru-RU', {
+                day: '2-digit',
+                month: '2-digit',
+                year: 'numeric',
+                hour: '2-digit',
+                minute: '2-digit',
+                second: '2-digit'
+            });
+        }
+
+        function formatSize(bytes) {
+            if (bytes < 1024) return `${bytes} B`;
+            if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+            return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+        }
+
+        function formatTime(seconds) {
+            const mins = Math.floor(seconds / 60);
+            const secs = Math.floor(seconds % 60);
+            return `${mins}м ${secs}с`;
+        }
+
+        function showError(message) {
+            const status = document.getElementById('download-status');
+            status.textContent = `X ${message}`;
+            status.className = 'status-message error';
+        }
+    </script>
+</body>
+</html>
